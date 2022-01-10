@@ -1,0 +1,377 @@
+---
+title: "Mariners 2022"
+author: "Nicholas Kondo"
+subtitle: 
+output:
+  html_document:
+    df_print: paged
+    toc: true 
+  html_notebook: default
+---
+
+```{r setup, include= FALSE}
+
+# Please leave this code chunk as is. It makes some slight formatting changes to alter the output to be more aesthetically pleasing. 
+
+library(knitr)
+
+# Change the number in set seed to your own favorite number
+set.seed(4)
+options(width=70)
+options(scipen=99)
+
+
+# this sets text outputted in code chunks to small
+opts_chunk$set(tidy.opts=list(width.wrap=50),tidy=TRUE, size = "vsmall")  
+opts_chunk$set(message = FALSE,                                          
+               warning = FALSE,
+               # "caching" stores objects in code chunks and only rewrites if you change things
+               cache = TRUE, 
+               cache.lazy = FALSE,
+               # automatically downloads dependency files
+               autodep = TRUE,
+               # 
+               cache.comments = FALSE,
+               # 
+               collapse = TRUE,
+               # change fig.width and fig.height to change the code height and width by default
+               fig.width = 5.5,  
+               fig.height = 4.5,
+               fig.align='center')
+```
+
+```{r setup-2, include= FALSE}
+
+# Always print this out before your assignment
+sessionInfo()
+getwd()
+
+```
+
+```{r setup-3, include =FALSE}
+# Loading libraries and data 
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(viridis)
+library(randomForest)
+library(mgcv)
+library(rpart)
+library(partykit)
+library(pROC)
+library(caret)
+library(tidymodels)
+
+train <- read.csv(here('Datasets','train.csv'))
+
+```
+
+# 1.  Data Exploration 
+
+```{r, include = FALSE}
+# Exploring variable names
+names(train)
+```
+
+The variable we are trying to predict, home runs, occurs less than 1% of all pitches.  
+```{r}
+table(train$is_hr)
+
+homeruns <- train %>% 
+  filter(is_hr == 1)
+
+```
+
+
+### 1.1 Pitch Location
+Let's look at how the location of pitches affects the probability of hitting a home run.  This heat map aligns with our baseball inference that pitches closer to the middle of the zone are more likely to be hit for a home run.  It'd be interesting to look at heat maps for different types of pitches and separately for RHP and LHP.  Plots for these splits are located in the appendix. **Link**
+```{r}
+# Creating generalized model
+      fit <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = train)
+      # Finding predicted probabilities over a 50 x 50 grid
+      x <- seq(-1.5, 1.5, length.out=50)
+      y <- seq(0.5, 5, length.out=50)
+      data.predict <- data.frame(plate_side = c(outer(x, y * 0 + 1)),
+                                 plate_height = c(outer(x * 0 + 1, y)))
+      # Creating LP model
+      lp <- predict(fit, data.predict)
+      # Adding the probability of hitting a home run given the location 
+      data.predict$Probability <- exp(lp) / (1 + exp(lp))
+      # Creating the K Zone
+      topKzone <- 3.5
+      botKzone <- 1.6
+      inKzone <- -0.95
+      outKzone <- 0.95
+      kZone <- data.frame(
+        x=c(inKzone, inKzone, outKzone, outKzone, inKzone),
+        y=c(botKzone, topKzone, topKzone, botKzone, botKzone))
+      # Constructing the plot for ALL pitchers
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= Probability)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "All Pitchers",
+             caption = paste("N = ", nrow(train)))
+```
+ 
+ ### 1.2 Missing Values
+Exploring the missing values across the data set.  
+```{r}
+sort(colSums(is.na(train)))
+```
+
+There are a lot of NA values for pitch type... let's check out the different types of pitches.  
+```{r}
+train$pitch_type <- as.factor(train$pitch_type)
+table(train$pitch_type)
+```
+
+There are six types of pitches listed in this data set with a majority of pitches being  a fastball, and a low number of knuckleballs.  Here we are going to look at a dataset of the pitches where `pitch_type = NA`
+```{r}
+NA_pitchType <- train %>% 
+  filter(is.na(train$pitch_type))
+```
+ 
+ 
+ 
+# 2. Feature Engineering
+
+## 2.1 Handing Missing Values 
+
+### Pitch Type 
+After scrolling through the data set containing NA values, which can be looked at here **hyperlink**, the pitches seem to be somewhat normal- the pitches weren't spike or thrown over the backstop, and some actually were even hit for home run.  We should try to keep this data.  My next thought is that only so many pitches can fall under the six classes of pitches in the data set.  
+
+I would assume two-seamers and cut-fastballs could fall under fastballs, but what about a pitch like a knuckle curve?  Would that be considered a curve or a knuckball?  Perhaps there are pitches that were not able to be classified.  This data should be preserved so for all pitches listed NA, it will be classified as `other`
+
+**Provide link to dataset**
+
+```{r}
+# Changing pitch type to character, replacing NA values with "other", then converting back to factor
+train1 <- train  %>% 
+  select(-date, -umpire_id, -catcher_id,  -inning, -top_bottom, -y55, -pitch_id, -pitcher_id, -batter_id, -tilt)
+
+train1$pitch_type <- as.character(train1$pitch_type)
+train1$pitch_type[is.na(train1$pitch_type)] <- "Other"
+train1$pitch_type <- as.factor(train1$pitch_type)
+
+# Confirming NA values
+sort(colSums(is.na(train1)))
+levels(train1$pitch_type)
+
+```
+
+### Spin Rate
+To accomodate for spin rate missing values, we are going to impute the median spin rate based on the type of pitch.  To do this first we need to separate the pitches by pitch type, compute the median, then impute the median for the missing values.  
+```{r}
+# Creating separate data sets for each pitch type 
+fastballs <- train1 %>% 
+  filter(pitch_type == 'FA')
+curveballs <- train1 %>% 
+  filter(pitch_type == 'CU')
+changeups <- train1 %>% 
+  filter(pitch_type == 'CH')
+sinkers <- train1 %>% 
+  filter(pitch_type == 'SI')
+sliders <- train1 %>% 
+  filter(pitch_type == 'SL')
+knuckleballs <- train1 %>% 
+  filter(pitch_type == 'KN')
+others <- train1 %>% 
+  filter(pitch_type == 'Other')
+
+# Filling all NA spin_rate values with the median spin rate of that respective pitch
+fastballs$spin_rate[is.na(fastballs$spin_rate)] <- median(fastballs$spin_rate, na.rm=TRUE)
+curveballs$spin_rate[is.na(curveballs$spin_rate)] <- median(curveballs$spin_rate, na.rm=TRUE)
+changeups$spin_rate[is.na(changeups$spin_rate)] <- median(changeups$spin_rate, na.rm=TRUE)
+sinkers$spin_rate[is.na(sinkers$spin_rate)] <- median(sinkers$spin_rate, na.rm=TRUE)
+sliders$spin_rate[is.na(sliders$spin_rate)] <- median(sliders$spin_rate, na.rm=TRUE)
+knuckleballs$spin_rate[is.na(knuckleballs$spin_rate)] <- median(knuckleballs$spin_rate, na.rm=TRUE)
+others$spin_rate[is.na(others$spin_rate)] <- median(others$spin_rate, na.rm=TRUE)
+
+# Combining our pitch types back together
+train1 <- bind_rows(fastballs, curveballs, changeups, sinkers, sliders, knuckleballs, others)
+
+rm(fastballs, curveballs, changeups, sinkers, sliders, knuckleballs, others) # Freeing memory
+
+sort(colSums(is.na(train1)))
+```
+
+### Other Missing/Usual Values
+At this stage, we don't have many more missing values.  There are a series of unusual values where `vert_break`, `induced_break`, and `horz_break` have values of 0.0000.  We will remove the remaining unsual and missing values. 
+
+```{r}
+train1 %>% 
+  filter(is.na(vert_break))
+train1 %>% 
+  filter(vert_break == 0)
+# I find it very wierd that we are seeing values of 0.000 and I cannot explain the NA values for break, it may be random
+# Break is a very important variable so to access this accurately we should just throw out these missing values 
+# There is about 171 rows with NA and 450 rows of 0's across the board
+# I am ok with throwing away the data 
+# PCA?
+
+# Dropping NA values
+train1 <- na.omit(train1)
+
+# dropping rows where break was not recorded or recorded as 0.0000
+train1 <-subset(train1, vert_break!= 0)
+
+train1 <- as.data.frame(unclass(train1),                     
+                        stringsAsFactors = TRUE)
+```
+
+## 2.2 Resampling for the Imbalanced Classes 
+
+Since a home run occurs less than 1% of all pitches in the data set, a model like a random forest can predict ‘No HR’ every observation and the model would be correct 99% of the time, but that’s not useful for us.  Mulitple techniques for resolving the class imbalances were considered such as down-sampling, up-sampling, and hybrid method algorithms like SMOTE and ROSE.  This is different from splitting the data set.  The data was split into training and testing.  Once a balanced data set was created from the unbalanced training set, a prediction model was built off this augmented data set, and applied to the unbalanced test data.  
+
+### Downsampling
+The first resampling technique was down-sampling.  Down sampling is where we randomly subset all the classes in the training set so that their class frequencies match the minority class.  This would result in using only 2% of our training data being used to fit the mode.  
+```{r}
+# Let's create different versions of the training set prior to model tuning
+
+# Down sampling the data set 
+
+    # Changing is_hr, balls, strikes, and outs to a factor
+    train2 <- train1 %>%
+      mutate(is_hr = ifelse(is_hr == 1, "Class2", "Class1")) %>% 
+      mutate_if(is.character, factor) 
+
+    train2 <- train2 %>% 
+      rename(Class = is_hr)
+
+pitches_split <- initial_split(train2, strata = Class)
+pitches_train <- training(pitches_split)
+pitches_test <- testing(pitches_split)
+
+# Clearing up memory 
+rm(train, train1)
+```
+
+
+```{r}
+# Down sampling the data set 
+set.seed(400)
+down_train <- downSample(x = pitches_train[, -ncol(pitches_train)],
+                         y = pitches_train$Class)
+
+table(down_train$Class)
+```
+
+### Up-sampling
+The next resampling method is up-sampling.  Up-sampling randomly samples the rare-occurring class to be the same size as the majority class.  In other words, we will now have the same amount of home runs as non-home runs.  
+```{r}
+# Up sampling the data
+set.seed(400)
+up_train <- upSample(x = pitches_train[, -ncol(pitches_train)],
+                     y = pitches_train$Class)                         
+table(up_train$Class) 
+```
+
+### SMOTE
+SMOTE stands for *synthetic minority over-sampling technique.  This technique synthesizes new occurrences of home runs from the existing examples. 
+```{r}
+# SMOTE 
+library(DMwR)
+
+set.seed(9560)
+smote_train <- SMOTE(Class ~ ., data  = pitches_train)                         
+table(smote_train$Class) 
+```
+
+### ROSE
+ROSE stands for random over-sampling examples and is a bootstrap-based technique to help deal with the imbalanced classes.  
+```{r}
+# ROSE
+library(ROSE)
+
+set.seed(9560)
+rose_train <- ROSE(Class ~ ., data  = pitches_train)$data                         
+table(rose_train$Class) 
+```
+
+`date`: Date in MM/DD/YY
+
+`pitcher_id`: Pitcher identifier, unique
+
+`pitcher_side` Handedness of pitcher (right or left)
+
+`batter_id`: Batter identifier, unique
+
+`batter_side`: Handedness of batter (right or left)
+
+`stadium_id`: Stadium identifier, unique
+
+`umpire_id`: Umpire identifier, unique
+
+`catcher_id`: Catcher identifier, unique
+
+`inning`: Inning (1-9)
+
+`top_bottom`: Top or Bottom of the inning. (1 or 2, 1 = ? 2 + ?)
+
+`outs`: Number of outs (0, 1, or 2)
+
+`balls` Number of balls (0, 1, 2, or 3)
+
+`strikes` Number of strikes (0, 1, or 2)
+
+`release_speed`: Speed of pitch when it leaves the pitcher’s hand
+
+`vert_release_angle`: Initial vertical (up-down) direction of the ball when it leaves the pitcher’s hand, reported in degrees. A positive number means the ball is released upward, while a negative number means the ball is released downward
+
+`horz_release_angle`: Initial horizontal (left-right) direction of the ball when it leaves the pitcher’s hand, reported in degrees. A positive number means the ball is released to the right from the pitcher’s perspective, while a negative number means the ball is released to the left from the pitcher’s perspective.
+
+`spin_rate`: How fast the ball is spinning aas it leaves the pitcher's hand, reported in the number of times the pitched ball would spin per minute (revolutions per minute)
+
+`spin_axis`: Direction the ball is spinning, reported in degrees of tilt. Note that: 
+A ball with a spin axis of 0 has pure top spin.
+A ball with a spin axis of 180 has pure backspin.  The ball drops less than what gravity would cause alone.
+A ball with a spin axis of 90 is spinning squarely toward the left from a pitcher's perspective and will break to the left.
+A ball with a spin axis of 270 is spinning squarely toward the right, from a pitcher's perspective and will break to the right.
+
+`tilt`: Spin axis converted into clock time, rounded to the nearest 15 minutes. As a rule of thumb, the ball will break in the direction of the number on the clock face. For example:
+a. 6:00 is perfect top spin (classic “12 – 6” curveball), causing the ball to break down
+b. 12:00 is perfect back spin (Four seam fastball, with no left-right movement), causing the ball to break upward relative to how it would have moved due to gravity alone - cutters are around 11:00 and sinkers are around 2:00 for a RHP, while cutters are around 1:00 and sinkers around 10:00 for a LHP
+c. 3:00 is a “Frisbee” spinning and breaking to the right, while 9:00 is a “Frisbee” spinning and breaking to the left.
+
+`rel_height`: Height of the ball 
+
+`rel_side`
+
+`extension`: Distance from the rubber at which the pitcher releases the ball
+
+`vert_break`: Distance between where the pitch actually crosses the front of home plate height-wise, and where it would have crossed home plate height-wise if had it traveled in a perfectly straight line from release, completely unaffected by gravity. Note: This number will be quite large for pitches released with a positive vertical angle
+
+`induced_vert_break`: Distance between where the pitch actually crosses the front of home plate height-wise, and where it would have crossed home plate height-wise if had it traveled in a perfectly straight line from release, but affected by gravity. Note: If this number is positive, the ball broke “upwards”, or in reality dropped less than it would have due to gravity alone – it does not necessarily mean that the ball actually rose.
+
+`horz_break`: Distance between where the pitch actually crosses the front of home plate sidewise, and where it would have crossed home plate side-wise if had it traveled in a perfectly straight line from release. A positive number means the break was to the right from the pitcher’s perspective, while a negative number means the break was to the left from the pitcher’s perspective.
+
+`plate_height`
+
+`plate_side`
+
+`zone_speed`: Speed of pitch when it crosses the plate
+
+`vert_approach_angle`:
+
+`horz_approach_angle`:
+
+`x55`
+
+`y55`
+
+`z55`
+
+`pitch_type`:  Pitch classification (Fastball, Curveball, etc.)
+
+`pitch_id`: Pitch identifier
+
+`is_hr`: Binary indicator is pitch is home run or not.  
+
+references: https://emspeedtraining.com/programs/driveline/
+
