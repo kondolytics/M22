@@ -10,16 +10,12 @@ output:
 ---
 
 ```{r setup, include= FALSE}
-
-# Please leave this code chunk as is. It makes some slight formatting changes to alter the output to be more aesthetically pleasing. 
-
 library(knitr)
 
 # Change the number in set seed to your own favorite number
 set.seed(4)
 options(width=70)
 options(scipen=99)
-
 
 # this sets text outputted in code chunks to small
 opts_chunk$set(tidy.opts=list(width.wrap=50),tidy=TRUE, size = "vsmall")  
@@ -63,6 +59,8 @@ library(partykit)
 library(pROC)
 library(caret)
 library(tidymodels)
+library(DMwR)
+library(ROSE)
 
 train <- read.csv(here('Datasets','train.csv'))
 
@@ -81,12 +79,11 @@ table(train$is_hr)
 
 homeruns <- train %>% 
   filter(is_hr == 1)
-
 ```
 
 
 ### 1.1 Pitch Location
-Let's look at how the location of pitches affects the probability of hitting a home run.  This heat map aligns with our baseball inference that pitches closer to the middle of the zone are more likely to be hit for a home run.  It'd be interesting to look at heat maps for different types of pitches and separately for RHP and LHP.  Plots for these splits are located in the appendix. **Link**
+Let's look at how the location of pitches affects the probability of hitting a home run.  This heat map aligns with our baseball inference that pitches closer to the middle of the zone are more likely to be hit for a home run.  It'd be interesting to look at heat maps for different types of pitches and separately for RHP and LHP.  Plots for these splits are located in the [Appendix](#appendix).
 ```{r}
 # Creating generalized model
       fit <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = train)
@@ -229,7 +226,7 @@ train1 <- as.data.frame(unclass(train1),
 
 Since a home run occurs less than 1% of all pitches in the data set, a model like a random forest can predict ‘No HR’ every observation and the model would be correct 99% of the time, but that’s not useful for us.  Mulitple techniques for resolving the class imbalances were considered such as down-sampling, up-sampling, and hybrid method algorithms like SMOTE and ROSE.  This is different from splitting the data set.  The data was split into training and testing.  Once a balanced data set was created from the unbalanced training set, a prediction model was built off this augmented data set, and applied to the unbalanced test data.  
 
-### Downsampling
+### Down-sampling
 The first resampling technique was down-sampling.  Down sampling is where we randomly subset all the classes in the training set so that their class frequencies match the minority class.  This would result in using only 2% of our training data being used to fit the mode.  
 ```{r}
 # Let's create different versions of the training set prior to model tuning
@@ -275,9 +272,7 @@ table(up_train$Class)
 ### SMOTE
 SMOTE stands for *synthetic minority over-sampling technique.  This technique synthesizes new occurrences of home runs from the existing examples. 
 ```{r}
-# SMOTE 
-library(DMwR)
-
+# SMOTE
 set.seed(9560)
 smote_train <- SMOTE(Class ~ ., data  = pitches_train)                         
 table(smote_train$Class) 
@@ -287,12 +282,449 @@ table(smote_train$Class)
 ROSE stands for random over-sampling examples and is a bootstrap-based technique to help deal with the imbalanced classes.  
 ```{r}
 # ROSE
-library(ROSE)
-
 set.seed(9560)
 rose_train <- ROSE(Class ~ ., data  = pitches_train)$data                         
 table(rose_train$Class) 
 ```
+
+### Cross Validation
+To evaluate the techniques  we will used a bagged classification and estimate the AUC (Area under ROC Curve) using five repeats of 10 fold cross validation.  
+```{r}
+ctrl <- trainControl(method = "repeatedcv", repeats = 5,
+                     classProbs = TRUE,
+                     summaryFunction = twoClassSummary)
+
+set.seed(5627)
+orig_fit <- train(Class ~ ., data = pitches_train, 
+                  method = "treebag",
+                  nbagg = 10,
+                  metric = "ROC",
+                  trControl = ctrl)
+```
+```{r}
+set.seed(562)
+down_outside <- train(Class ~ ., data = down_train,
+                      method = "treebag",
+                      nbagg = 10,
+                      metric = "ROC",
+                      trControl = ctrl)
+```
+```{r}
+set.seed(562)
+up_outside <- train(Class ~ ., data = up_train, 
+                    method = "treebag",
+                    nbagg = 10,
+                    metric = "ROC",
+                    trControl = ctrl)
+```
+```{r}
+set.seed(562)
+rose_outside <- train(Class ~ ., data = rose_train, 
+                      method = "treebag",
+                      nbagg = 10,
+                      metric = "ROC",
+                      trControl = ctrl)
+```
+
+## Appendix {#appendix}
+
+###Heat maps
+
+[RHP - All Pitch Types](#RHPAllpitches)
+
+[LHP - All Pitch Types](#LHPAllpitches)
+
+[RHP - Fastballs](#RHPFA)
+
+[LHP - Fastballs](#LHPFA)
+
+[RHP - Curveballs](#RHPCU)
+
+[LHP - Curveballs](#LHPCU)
+
+[RHP - Sliders](#RHPSL)
+
+[LHP - Sliders](#LHPSL)
+
+[RHP - Changeups](#RHPCH)
+
+[LHP - Changeups](#LHPCH)
+
+[RHP - Sinkers](#RHPSI)
+
+[LHP - Sinkers](#LHPSI)
+
+[RHP - Knuckleballs](#RHPKN)
+
+[LHP - Knuckleballs](#LHPKN)
+
+Home run probabilities for all pitch types from Right-Handed Pitchers. {#RHPAllpitches}
+```{r, echo = FALSE}
+ # Creating data set with only RHP
+      RHP <- train %>% 
+        filter(pitcher_side == 'Right')
+      # Creating data set with only LHP
+      LHP <- train %>% 
+        filter(pitcher_side == 'Left')
+      # Creating generalized model
+      fitRHP <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = RHP)
+      fitLHP <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = LHP)
+      # Finding predicted probabilities over a 50 x 50 grid
+      x <- seq(-1.5, 1.5, length.out=50)
+      y <- seq(0.5, 5, length.out=50)
+      data.predict <- data.frame(plate_side = c(outer(x, y * 0 + 1)),
+                                 plate_height = c(outer(x * 0 + 1, y)))
+      # Creating LP model
+      lpRHP <- predict(fitRHP, data.predict)
+      lpLHP <- predict(fitLHP, data.predict)
+      # Adding the probability of hitting a home run given the location 
+      data.predict$ProbabilityRHP <- exp(lpRHP) / (1 + exp(lpRHP))
+      data.predict$ProbabilityLHP <- exp(lpLHP) / (1 + exp(lpLHP))
+      
+      # Constructing plot
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityRHP)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "RHP - All Pitches",
+             caption = paste("N = ",nrow(RHP)))
+```
+
+Home run probabilities for all pitch types from Left-Handed Pitchers. {#LHPAllpitches}
+```{r, echo = FALSE}
+ ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityLHP)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "LHP - All Pitches",
+             caption = paste("N = ",nrow(LHP)))
+```
+
+```{r, include = FALSE}
+ -------------------------------------------------------------------------------
+        # Creating heat map for each pitch type (RHP)
+      -------------------------------------------------------------------------------
+      ## Creating Data sets 
+      # Fastballs
+      RHP_FA <- train %>% 
+        filter(pitcher_side == 'Right',
+               pitch_type == "FA")
+      # Curveballs
+      RHP_CU <- train %>% 
+        filter(pitcher_side == 'Right',
+               pitch_type == "CU")
+      # Sliders
+      RHP_SL <- train %>% 
+        filter(pitcher_side == 'Right',
+               pitch_type == "SL")
+      # Changeups
+      RHP_CH <- train %>% 
+        filter(pitcher_side == 'Right',
+               pitch_type == "CH")
+      # Sinkers
+      RHP_SI <- train %>% 
+        filter(pitcher_side == 'Right',
+               pitch_type == "SI")
+      # Knuckleballs
+      RHP_KN <- train %>% 
+        filter(pitcher_side == 'Right',
+               pitch_type == "KN")
+      
+       -------------------------------------------------------------------------------
+        # Creating heat map for each pitch type (LHP)
+      -------------------------------------------------------------------------------
+      
+      ## Creating Data sets 
+      # Fastballs
+      LHP_FA <- train %>% 
+        filter(pitcher_side == 'Left',
+               pitch_type == "FA")
+      # Curveballs
+      LHP_CU <- train %>% 
+        filter(pitcher_side == 'Left',
+               pitch_type == "CU")
+      # Sliders
+      LHP_SL <- train %>% 
+        filter(pitcher_side == 'Left',
+               pitch_type == "SL")
+      # Changeups
+      LHP_CH <- train %>% 
+        filter(pitcher_side == 'Left',
+               pitch_type == "CH")
+      # Sinkers
+      LHP_SI <- train %>% 
+        filter(pitcher_side == 'Left',
+               pitch_type == "SI")
+      # Knuckleballs
+      LHP_KN <- train %>% 
+        filter(pitcher_side == 'Left',
+               pitch_type == "KN")
+```
+
+```{r, include = FALSE}
+# Creating generalized models (RHP)
+      fitRHP_FA <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = RHP_FA)
+      fitRHP_CU <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = RHP_CU)
+      fitRHP_SL <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = RHP_SL)
+      fitRHP_CH <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = RHP_CH)
+      fitRHP_SI <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = RHP_SI)
+      fitRHP_KN <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = RHP_KN)
+      
+# Creating generalized models (LHP)
+      fitLHP_FA <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = LHP_FA)
+      fitLHP_CU <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = LHP_CU)
+      fitLHP_SL <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = LHP_SL)
+      fitLHP_CH <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = LHP_CH)
+      fitLHP_SI <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = LHP_SI)
+      fitLHP_KN <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = LHP_KN)
+```
+
+```{r, INCLUDE = FALSE}
+# Finding predicted probabilities over a 50 x 50 grid
+      x <- seq(-1.5, 1.5, length.out=50)
+      y <- seq(0.5, 5, length.out=50)
+      data.predict <- data.frame(plate_side = c(outer(x, y * 0 + 1)),
+                                 plate_height = c(outer(x * 0 + 1, y)))
+      
+      # Creating LP models
+      lpRHP_FA <- predict(fitRHP_FA, data.predict)
+      lpRHP_CU <- predict(fitRHP_CU, data.predict)
+      lpRHP_SL <- predict(fitRHP_SL, data.predict)
+      lpRHP_CH <- predict(fitRHP_CH, data.predict)
+      lpRHP_SI <- predict(fitRHP_SI, data.predict)
+      lpRHP_KN <- predict(fitRHP_KN, data.predict)
+      
+       # Creating LP models
+      lpLHP_FA <- predict(fitLHP_FA, data.predict)
+      lpLHP_CU <- predict(fitLHP_CU, data.predict)
+      lpLHP_SL <- predict(fitLHP_SL, data.predict)
+      lpLHP_CH <- predict(fitLHP_CH, data.predict)
+      lpLHP_SI <- predict(fitLHP_SI, data.predict)
+      lpLHP_KN <- predict(fitLHP_KN, data.predict)
+
+```
+
+```{r, include = FALSE}
+ # Adding the probability of hitting a home run given the location (RHP)
+      data.predict$ProbabilityRHP_FA <- exp(lpRHP_FA) / (1 + exp(lpRHP_FA))
+      data.predict$ProbabilityRHP_CU <- exp(lpRHP_CU) / (1 + exp(lpRHP_CU))
+      data.predict$ProbabilityRHP_SL <- exp(lpRHP_SL) / (1 + exp(lpRHP_SL))
+      data.predict$ProbabilityRHP_CH <- exp(lpRHP_CH) / (1 + exp(lpRHP_CH))
+      data.predict$ProbabilityRHP_SI <- exp(lpRHP_SI) / (1 + exp(lpRHP_SI))
+      data.predict$ProbabilityRHP_KN <- exp(lpRHP_KN) / (1 + exp(lpRHP_KN))
+      
+       # Adding the probability of hitting a home run given the location (LHP)
+      data.predict$ProbabilityLHP_FA <- exp(lpRHP_FA) / (1 + exp(lpLHP_FA))
+      data.predict$ProbabilityLHP_CU <- exp(lpRHP_CU) / (1 + exp(lpLHP_CU))
+      data.predict$ProbabilityLHP_SL <- exp(lpRHP_SL) / (1 + exp(lpLHP_SL))
+      data.predict$ProbabilityLHP_CH <- exp(lpRHP_CH) / (1 + exp(lpLHP_CH))
+      data.predict$ProbabilityLHP_SI <- exp(lpRHP_SI) / (1 + exp(lpLHP_SI))
+      data.predict$ProbabilityLHP_KN <- exp(lpRHP_KN) / (1 + exp(lpLHP_KN))
+```
+
+Home run probabilities on Fastballs from Right-Handed Pitchers{#RHPFA}
+```{r, echo = FALSE}
+ # Constructing GGplots
+      # Fastballs LHP
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityRHP_FA)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "RHP Fastballs",
+             caption = paste("N = ",nrow(RHP_FA)))
+```
+
+Home run probabilities on Fastballs from Left-Handed Pitchers{#LHPFA}
+```{r, echo = FALSE}
+ # Constructing GGplots
+      # Fastballs LHP
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityLHP_FA)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "LHP Fastballs",
+             caption = paste("N = ",nrow(LHP_FA)))
+```
+
+Home run probabilities on Curveballs from Right-Handed Pitchers{#RHPCU}
+```{r, echo = FALSE}
+# Curveballs
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityRHP_CU)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "RHP Curveballs",
+             caption = paste("N = ",nrow(RHP_CU)))
+```
+
+Home run probabilities on Curveballs from Left-Handed Pitchers{#LHPCU}
+```{r, echo = FALSE}
+# Curveballs
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityLHP_CU)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "LHP Curveballs",
+             caption = paste("N = ",nrow(LHP_CU)))
+```
+
+Home run probabilities on Sliders from Right-Handed Pitchers{#RHPSL}
+```{r, echo = FALSE}
+# Sliders
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityRHP_SL)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "RHP Sliders",
+             caption = paste("N = ",nrow(RHP_SL)))
+```
+
+Home run probabilities on Sliders from Left-Handed Pitchers{#LHPSL}
+```{r, echo = FALSE}
+# Sliders
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityLHP_SL)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "LHP Sliders",
+             caption = paste("N = ",nrow(LHP_SL)))
+```
+
+Home run probabilities on Changeups from Right-Handed Pitchers{#RHPCH}
+```{r, echo = FALSE}
+# Change Ups
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityRHP_CH)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "RHP Change Ups",
+             caption = paste("N = ",nrow(RHP_CH)))
+```
+
+Home run probabilities on Changeups from Left-Handed Pitchers{#LHPCH}
+```{r, echo = FALSE}
+# Change Ups
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityLHP_CH)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "LHP Change Ups",
+             caption = paste("N = ",nrow(LHP_CH)))
+```
+
+Home run probabilities on Sinkers from Right-Handed Pitchers{#RHPSI}
+```{r, echo = FALSE}
+# Sinkers
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityRHP_SI)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "RHP Sinkers",
+             caption = paste("N = ",nrow(RHP_SI)))
+
+```
+
+Home run probabilities on Sinkers from Left-Handed Pitchers{#LHPSI}
+```{r, echo = FALSE}
+# Sinkers
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityLHP_SI)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "LHP Sinkers",
+             caption = paste("N = ",nrow(LHP_SI)))
+```
+
+Home run probabilities on Knuckleballs from Right-Handed Pitchers{#RHPKN}.  Keep in mind the sample size is small.  
+```{r, echo = FALSE}
+ # Knuckleballs
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityRHP_KN)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "RHP Knuckleballs",
+             caption = paste("N = ",nrow(RHP_KN)))
+```
+
+Home run probabilities on Knuckleballs from Left-Handed Pitchers{#LHPKN}.  Keep in mind the sample size is small.  
+```{r, echo = FALSE}
+ # Knuckleballs
+      ggplot(kZone, aes(x, y)) +
+        geom_tile(data=data.predict, 
+                  aes(x= plate_side, y= plate_height, fill= ProbabilityLHP_KN)) +
+        scale_fill_distiller(palette = "Spectral") +
+        geom_path(lwd=1.5, col="black") +
+        coord_fixed() + 
+        labs(title = "HR Probability Based on Pitch Location",
+             subtitle = "LHP Knuckleballs",
+             caption = paste("N = ",nrow(LHP_KN)))
+```
+
+```{r, echo = FALSE}
+
+
+```
+
+```{r, echo = FALSE}
+
+
+```
+
+```{r, echo = FALSE}
+
+
+```
+
+```{r, echo = FALSE}
+
+
+```
+
+```{r, echo = FALSE}
+
+
+```
+
+
 
 `date`: Date in MM/DD/YY
 
@@ -374,4 +806,3 @@ c. 3:00 is a “Frisbee” spinning and breaking to the right, while 9:00 is a �
 `is_hr`: Binary indicator is pitch is home run or not.  
 
 references: https://emspeedtraining.com/programs/driveline/
-
