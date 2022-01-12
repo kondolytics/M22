@@ -467,6 +467,55 @@ plot_min_depth_distribution(rf_fit)
 ```
 
 
+ctrl <- trainControl(method = "repeatedcv", repeats = 5,
+                         classProbs = TRUE,
+                         summaryFunction = twoClassSummary,
+                         ## new option here:
+                         sampling = "down")
+    
+    set.seed(5627)
+    down_inside <- train(Class ~ ., data = pitches_train,
+                         method = "treebag",
+                         nbagg = 10,
+                         metric = "ROC",
+                         trControl = ctrl)
+    
+    ## now just change that option
+    ctrl$sampling <- "up"
+    
+    set.seed(5627)
+    up_inside <- train(Class ~ ., data = pitches_train,
+                       method = "treebag",
+                       nbagg = 10,
+                       metric = "ROC",
+                       trControl = ctrl)
+    
+    ctrl$sampling <- "rose"
+    
+    set.seed(5627)
+    rose_inside <- train(Class ~ ., data = pitches_train,
+                         method = "treebag",
+                         nbagg = 10,
+                         metric = "ROC",
+                         trControl = ctrl)
+    
+    ctrl$sampling <- "smote"
+    
+    set.seed(5627)
+    smote_inside <- train(Class ~ ., data = pitches_train,
+                          method = "treebag",
+                          nbagg = 10,
+                          metric = "ROC",
+                          trControl = ctrl)
+    
+    # Here are the resampling and test set results 
+    
+    inside_models <- list(original = orig_fit,
+                          down = down_inside,
+                          up = up_inside,
+                          SMOTE = smote_inside,
+                          ROSE = rose_inside)
+
 
 
 
