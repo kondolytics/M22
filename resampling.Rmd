@@ -1,0 +1,413 @@
+---
+title: "Mariners 2022"
+author: "Nicholas Kondo"
+subtitle: 
+output:
+  html_document:
+    df_print: paged
+    toc: true 
+  html_notebook: default
+---
+
+```{r setup, include= FALSE}
+library(knitr)
+
+# Change the number in set seed to your own favorite number
+set.seed(4)
+options(width=70)
+options(scipen=99)
+
+# this sets text outputted in code chunks to small
+opts_chunk$set(tidy.opts=list(width.wrap=50),tidy=TRUE, size = "vsmall")  
+opts_chunk$set(message = FALSE,                                          
+               warning = FALSE,
+               # "caching" stores objects in code chunks and only rewrites if you change things
+               cache = TRUE, 
+               cache.lazy = FALSE,
+               # automatically downloads dependency files
+               autodep = TRUE,
+               # 
+               cache.comments = FALSE,
+               # 
+               collapse = TRUE,
+               # change fig.width and fig.height to change the code height and width by default
+               fig.width = 5.5,  
+               fig.height = 4.5,
+               fig.align='center')
+```
+
+```{r setup-2, include= FALSE}
+
+# Always print this out before your assignment
+sessionInfo()
+getwd()
+
+```
+
+```{r setup-3, include =FALSE}
+# Loading libraries and data 
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(viridis)
+library(randomForest)
+library(mgcv)
+library(rpart)
+library(partykit)
+library(pROC)
+library(caret)
+library(tidymodels)
+library(DMwR)
+library(ROSE)
+library(randomForestExplainer)
+library(themis)
+
+train <- read.csv(here('Datasets','train.csv'))
+
+```
+
+# 1.  Data Exploration 
+
+```{r}
+# Changing pitch type to character, replacing NA values with "other", then converting back to factor
+train1 <- train  %>% 
+  select(-date, -umpire_id, -catcher_id,  -inning, -top_bottom, -y55, -pitch_id, -pitcher_id, -batter_id, -tilt)
+
+train1$pitch_type <- as.character(train1$pitch_type)
+train1$pitch_type[is.na(train1$pitch_type)] <- "Other"
+train1$pitch_type <- as.factor(train1$pitch_type)
+
+# Confirming NA values
+sort(colSums(is.na(train1)))
+levels(train1$pitch_type)
+
+```
+
+### Spin Rate
+To accommodate for spin rate missing values, we are going to impute the median spin rate based on the type of pitch.  To do this first we need to separate the pitches by pitch type, compute the median, then impute the median for the missing values.  
+```{r}
+# Creating separate data sets for each pitch type 
+fastballs <- train1 %>% 
+  filter(pitch_type == 'FA')
+curveballs <- train1 %>% 
+  filter(pitch_type == 'CU')
+changeups <- train1 %>% 
+  filter(pitch_type == 'CH')
+sinkers <- train1 %>% 
+  filter(pitch_type == 'SI')
+sliders <- train1 %>% 
+  filter(pitch_type == 'SL')
+knuckleballs <- train1 %>% 
+  filter(pitch_type == 'KN')
+others <- train1 %>% 
+  filter(pitch_type == 'Other')
+
+# Filling all NA spin_rate values with the median spin rate of that respective pitch
+fastballs$spin_rate[is.na(fastballs$spin_rate)] <- median(fastballs$spin_rate, na.rm=TRUE)
+curveballs$spin_rate[is.na(curveballs$spin_rate)] <- median(curveballs$spin_rate, na.rm=TRUE)
+changeups$spin_rate[is.na(changeups$spin_rate)] <- median(changeups$spin_rate, na.rm=TRUE)
+sinkers$spin_rate[is.na(sinkers$spin_rate)] <- median(sinkers$spin_rate, na.rm=TRUE)
+sliders$spin_rate[is.na(sliders$spin_rate)] <- median(sliders$spin_rate, na.rm=TRUE)
+knuckleballs$spin_rate[is.na(knuckleballs$spin_rate)] <- median(knuckleballs$spin_rate, na.rm=TRUE)
+others$spin_rate[is.na(others$spin_rate)] <- median(others$spin_rate, na.rm=TRUE)
+
+# Combining our pitch types back together
+train1 <- bind_rows(fastballs, curveballs, changeups, sinkers, sliders, knuckleballs, others)
+
+
+
+sort(colSums(is.na(train1)))
+```
+
+### Other Missing/Usual Values
+At this stage, we don't have many more missing values.  There are a series of unusual values where `vert_break`, `induced_break`, and `horz_break` have values of 0.0000.  We will remove the remaining unsual and missing values. 
+
+```{r, include = FALSE}
+
+train1 %>% 
+  filter(is.na(vert_break))
+train1 %>% 
+  filter(vert_break == 0)
+# I find it very wierd that we are seeing values of 0.000 and I cannot explain the NA values for break, it may be random
+# Break is a very important variable so to access this accurately we should just throw out these missing values 
+# There is about 171 rows with NA and 450 rows of 0's across the board
+# I am ok with throwing away the data 
+# PCA?
+
+# Dropping NA values
+train1 <- na.omit(train1)
+
+# dropping rows where break was not recorded or recorded as 0.0000
+train1 <-subset(train1, vert_break!= 0)
+
+train1 <- as.data.frame(unclass(train1),                     
+                        stringsAsFactors = TRUE)
+```
+
+## Count Variable
+
+Next let's add a count variable.  The reason for this is because each count is unique, and an 0-0 count should be treated differently than an 0-2 count. 
+```{r}
+# Creating a count variable 
+train1 <- train1 %>% 
+  mutate(count = paste(balls, "-", strikes)) 
+train1$count <- as.factor(train1$count)
+
+table(train1$count)
+```
+
+## Hitter-Pitcher Matchup
+
+Is this a Righty-Right matchup?  Righty-Lefty matchup?  
+```{r}
+# Creating a matchup feature
+      # Matchup will indicate the handedness of the matchups
+      train1 <- na.omit(train1)
+      train1 <- train1 %>% 
+              mutate(matchup = 
+                       ifelse(pitcher_side == "Right" & batter_side == "Right", "Righty-Righty",
+                       ifelse(pitcher_side == "Right" & batter_side == "Left", "Righty-Lefty",
+                       ifelse(pitcher_side == "Right" & batter_side == "Undefine", "Righty-Lefty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Left", "Lefty-Lefty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Right", "Lefty-Righty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Switch", "Lefty-Righty","NA")))))))
+      
+      train1$matchup <- as.factor(train1$matchup)
+      
+      table(train1$matchup)
+```
+
+## 2.2 Resampling for the Imbalanced Classes 
+
+Since a home run occurs less than 1% of all pitches in the data set, a model like a random forest can predict ‘No HR’ every observation and the model would be correct 99% of the time, but that’s not useful for us.  Mulitple techniques for resolving the class imbalances were considered such as down-sampling, up-sampling, and hybrid method algorithms like SMOTE and ROSE.  This is different from splitting the data set.  The data was split into training and testing.  Once a balanced data set was created from the unbalanced training set, a prediction model was built off this augmented data set, and applied to the unbalanced test data.  
+
+### Down-sampling
+The first resampling technique was down-sampling.  Down sampling is where we randomly subset all the classes in the training set so that their class frequencies match the minority class.  This would result in using only 2% of our training data being used to fit the mode.  
+```{r}
+# Let's create different versions of the training set prior to model tuning
+
+# Down sampling the data set 
+
+    # Changing is_hr, balls, strikes, and outs to a factor
+    train2 <- train1 %>%
+      mutate(is_hr = ifelse(is_hr == 1, "Class2", "Class1")) %>% 
+      mutate_if(is.character, factor) 
+
+    train2 <- train2 %>% 
+      rename(Class = is_hr)
+    
+  fastballs <- train2 %>% 
+  filter(pitch_type == 'FA')
+  curveballs <- train2 %>% 
+  filter(pitch_type == 'CU')
+  changeups <- train2 %>% 
+  filter(pitch_type == 'CH')
+  sinkers <- train2 %>% 
+  filter(pitch_type == 'SI')
+  sliders <- train2 %>% 
+  filter(pitch_type == 'SL')
+  knuckleballs <- train2 %>% 
+  filter(pitch_type == 'KN')
+  others <- train2 %>% 
+  filter(pitch_type == 'Other')
+
+FA_split <- initial_split(fastballs, strata = Class)
+FA_train <- training(FA_split)
+FA_test <- testing(FA_split)
+
+FA_train <- FA_train %>%  
+  mutate_if(is.integer, factor)
+```
+
+### Smote
+```{r}
+# SMOTE
+set.seed(9560)
+smote_train <- SMOTE(Class ~ ., data  = FA_train)                         
+table(smote_train$Class) 
+```
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", repeats = 5,
+                     classProbs = TRUE,
+                     summaryFunction = twoClassSummary)
+
+set.seed(5627)
+orig_fit <- train(Class ~ ., data = pitches_train, 
+                  method = "treebag",
+                  nbagg = 10,
+                  metric = "ROC",
+                  trControl = ctrl)
+```
+
+```{r}
+set.seed(562)
+smote_outside <- train(Class ~ ., data = smote_train, 
+                      method = "treebag",
+                      nbagg = 10,
+                      metric = "ROC",
+                      trControl = ctrl)
+
+```
+
+
+
+# Modeling (Julia Silge)
+
+```{r}
+#creating cross validation folds for our models 
+set.seed(435)
+FA_folds <- vfold_cv(FA_train)
+```
+
+Doing plain up sampling, a model will just really memorize the few examples that we have.  Instead of up sample we will try SMOTE, which uses nearest neighbors, which will make new examples of people who died.  
+```{r}
+# creating a recipe
+FA_recipe <- recipe(Class ~ ., data = FA_train) %>% 
+  step_dummy(all_nominal(), -Class) %>% 
+  step_smote(Class)
+
+FA_wf <- workflow() %>% 
+            add_recipe(FA_recipe)
+
+FA_wf
+# A workflow is wasy to stick things together and you can carry it around
+# The spot for the model is empty right now 
+# But is waiting for a model, so we will add the model to it 
+```
+
+```{r}
+FA_recipe %>% prep() %>% 
+bake(new_data = NULL) %>% count(Class)
+```
+
+```{r}
+glm_spec <- logistic_reg() %>% 
+  set_engine("glm")
+
+rf_spec <- rand_forest(trees = 500) %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+
+```
+
+
+```{r}
+doParallel::registerDoParallel()
+
+glm_rs <- FA_wf %>% 
+  add_model(glm_spec) %>% 
+# Now it has the recipe and the model
+  fit_resamples(
+    resamples = FA_folds,
+    metrics = metric_set(roc_auc, accuracy, specificity, sensitivity),
+    control = control_resamples(save_pred =  TRUE)
+  )
+# These models don't have much tuning and there isn't a strong tune to either one 
+# We are going to fit to all 10 folds and then we can use the empirically to see which one is better
+
+glm_rs
+```
+
+
+
+`# -------------------------------------------------------------------------------
+
+
+```{r}
+# logistic regression
+glm_spec <- logistic_reg() %>% 
+  set_engine("glm")
+
+# random forest
+rf_spec <- rand_forest(trees = 1000) %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+
+FA_workflow <- workflow() %>% 
+  add_recipe(FA_recipe)
+
+FA_workflow
+```
+
+```{r}
+# We are going to fit to all 10 of the cross validation roles 
+doParallel::registerDoParallel()
+
+glm_rs <- FA_workflow %>% 
+  add_model(glm_spec) %>% 
+  fit_resamples(
+    resamples = FA_folds,
+    metrics = metric_set(roc_auc, accuracy, sensitivity, specificity),
+    control = control_resamples(save_pred = TRUE)
+  )
+
+glm_rs
+```
+
+```{r}
+# We are going to fit to all 10 of the cross validation roles 
+
+rf_rs <- FA_workflow %>% 
+  add_model(rf_spec) %>% 
+  fit_resamples(
+    resamples = FA_folds,
+    metrics = metric_set(roc_auc, accuracy, sensitivity, specificity),
+    control = control_resamples(save_pred = TRUE)
+  )
+
+rf_rs
+```
+
+This model is awful.  The confusion matrix shows that it is not useful at all.  
+```{r}
+
+collect_metrics(rf_rs)
+
+rf_rs %>% 
+  conf_mat_resampled()
+
+```
+
+```{r}
+
+rf_rs %>% 
+  collect_predictions() %>% 
+  roc_curve(Class, .predictions) %>% # look
+  autoplot()
+```
+
+# Fit on training data, evaluate on testing data 
+```{r}
+
+FA_final <- FA_workflow %>% 
+  add_model(glm_spec) %>% 
+  last_fit(members_split)
+
+# These metrics are on the testing data 
+collect_metrics(FA_final)
+```
+
+# This is the testing data, let's use a confusion matrix
+```{r}
+collect_predictions(FA_final) %>% 
+  conf_mat(died, .pred_class)
+```
+
+
+```{r}
+FA_final %>% 
+  pull(.workflow) %>% 
+  pluck(1) %>% 
+  tidy(exponentiate = TRUE) # This is to get odds ratios 
+  arrange(estimate) %>% 
+    kable(digits = 3)
+
+
+```
+
+
+
+
