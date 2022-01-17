@@ -62,21 +62,27 @@ library(tidymodels)
 library(DMwR)
 library(ROSE)
 library(randomForestExplainer)
+library(themis)
+library(baguette)
+library(naniar)
 
 train <- read.csv(here('Datasets','train.csv'))
-
 ```
 
-# 1.  Data Exploration 
+# Exploratory Data Analysis
 
-```{r, include = FALSE}
-# Exploring variable names
-names(train)
-```
+This is a very imbalanced data set.  Home Runs occur less than 1% of all pitches.  Let's take a look below on Home Runs across pitch types.
 
-The variable we are trying to predict, home runs, occurs less than 1% of all pitches.  
 ```{r}
-table(train$is_hr)
+train %>%
+  filter(!is.na(pitch_type)) %>%
+  mutate(pitch_type = fct_lump(pitch_type, prop = 0.05)) %>%
+  count(pitch_type, is_hr) %>%
+  group_by(pitch_type) %>%
+  mutate(percent = scales::percent(n / sum(n))) %>%
+  kable(
+    col.names = c("Pitch Type", "Is_HR?", "Number of HRs", "% of HRs"),
+    align = "llrr")
 ```
 
 ```{r, include = FALSE}
@@ -84,8 +90,8 @@ homeruns <- train %>%
   filter(is_hr == 1)
 ```
 
-### 1.1 Pitch Location
-Let's look at how the location of pitches affects the probability of hitting a home run.  This heat map aligns with our baseball inference that pitches closer to the middle of the zone are more likely to be hit for a home run.  It'd be interesting to look at heat maps for different types of pitches and separately for RHP and LHP.  Plots for these splits are located in the [Appendix](#appendix).
+## 1.1 Pitch Location
+Let's look at how the location of pitches affects the probability of hitting a home run.  This heat map aligns with our baseball inference that pitches closer to the middle of the zone are more likely to be hit for a home run.  It'd be interesting to look at heat maps for different types of pitches and separately for RHP and LHP and splits based on pitch type.  
 ```{r}
 # Creating generalized model
       fit <- gam(is_hr ~ s(plate_side, plate_height), family = binomial, data = train)
@@ -117,33 +123,8 @@ Let's look at how the location of pitches affects the probability of hitting a h
              subtitle = "All Pitchers",
              caption = paste("N = ", nrow(train)))
 ```
- 
- There are clear parameters to many of our predictors.  For example, a home run can only occur between certain parameters.  There are not many lienar trends between home runs and other variables.  As seen in the plots below, pitches have a lot 
- 
-```{r}
 
-ggplot(train, aes(x = vert_approach_angle, y = is_hr, alpha = 1/100)) +
-         geom_point()
-
-ggplot(train, aes(x = horz_approach_angle, y = is_hr, alpha = 1/100)) +
-         geom_point()
-
-ggplot(train, aes(x = spin_rate, y = is_hr, alpha = 1/100)) +
-         geom_point()
-
-ggplot(train, aes(x = horz_break, y = is_hr, alpha = 1/100)) +
-         geom_point()
-
-ggplot(train, aes(x = induced_vert_break, y = is_hr, alpha = 1/100)) +
-         geom_point()
-
-```
- 
- 
- 
- 
- 
-### 1.2 Missing Values
+## 1.2 Missing Values
 Exploring the missing values across the data set.  
 ```{r}
 sort(colSums(is.na(train)))
@@ -155,42 +136,42 @@ train$pitch_type <- as.factor(train$pitch_type)
 table(train$pitch_type)
 ```
 
-There are six types of pitches listed in this data set with a majority of pitches being  a fastball, and a low number of knuckleballs.  Here we are going to look at a dataset of the pitches where `pitch_type = NA`
+There are six types of pitches listed in this data set with a majority of pitches being  a fastball, and a low number of knuckle balls.  Here we are going to look at a data set of the pitches where `pitch_type = NA` to understand why these missing values might be occurring.  
 ```{r}
 NA_pitchType <- train %>% 
   filter(is.na(train$pitch_type))
 ```
- 
- 
- 
-# 2. Feature Engineering
 
-## 2.1 Handing Missing Values 
+# Feature Engineering
 
-### Pitch Type 
-After scrolling through the data set containing NA values, which can be looked at here **hyperlink**, the pitches seem to be somewhat normal- the pitches weren't spike or thrown over the backstop, and some actually were even hit for home run.  We should try to keep this data.  My next thought is that only so many pitches can fall under the six classes of pitches in the data set.  
+The first section of feature engineering will deal with our missing values.  Next, we will normalize horizontal metrics for righties and lefties, followed by a count variable, and a variable that represents the type of matchup.  
 
-I would assume two-seamers and cut-fastballs could fall under fastballs, but what about a pitch like a knuckle curve?  Would that be considered a curve or a knuckball?  Perhaps there are pitches that were not able to be classified.  This data should be preserved so for all pitches listed NA, it will be classified as `other`
+## Handling Missing Values
 
-**Provide link to dataset**
-
+Most models don't allow any missing values.  In this section we are going to take steps to address these missing values, particularly focusing on pitch type and spin rate where we see the most missing data.  
 ```{r}
-# Changing pitch type to character, replacing NA values with "other", then converting back to factor
-train1 <- train  %>% 
-  select(-date, -umpire_id, -catcher_id,  -inning, -top_bottom, -y55, -pitch_id, -pitcher_id, -batter_id, -tilt)
+gg_miss_upset(train, nsets = 7)
+```
 
+The NA values for pitch type seem to be somewhat normal- meaning the pitches weren't spiked in the ground or thrown over the backstop, and some actually were even hit for home run.  We should try to keep this data.  My assumption is that not every pitch can fall under a pitch classification.  For example, we have 6 classes of pitch type: `FA` `CU` `CH` `SL` `SI` and `KN`.  What would we classify a knuckle-curve?  The best way to preseve this data is by implementing an "other" class for all the missing values. 
+```{r}
+# Creating a new data set and removing ID variables
+train1 <- train  %>% 
+  select(-date, -umpire_id, -catcher_id,  -inning, -top_bottom, -y55, -pitch_id, -pitcher_id, -batter_id, -tilt, -stadium_id,
+         -inning, -outs)
+# Changing to character
 train1$pitch_type <- as.character(train1$pitch_type)
-train1$pitch_type[is.na(train1$pitch_type)] <- "Other"
+# Changing NA values to other
+train1$pitch_type[is.na(train1$pitch_type)] <- "other"
 train1$pitch_type <- as.factor(train1$pitch_type)
 
 # Confirming NA values
 sort(colSums(is.na(train1)))
 levels(train1$pitch_type)
-
 ```
 
 ### Spin Rate
-To accomodate for spin rate missing values, we are going to impute the median spin rate based on the type of pitch.  To do this first we need to separate the pitches by pitch type, compute the median, then impute the median for the missing values.  
+To accommodate for spin rate missing values, we are going to impute the median spin rate based on the type of pitch.  To do this first we need to separate the pitches by pitch type, compute the median, then impute the median for the missing values.  
 ```{r}
 # Creating separate data sets for each pitch type 
 fastballs <- train1 %>% 
@@ -217,305 +198,716 @@ sliders$spin_rate[is.na(sliders$spin_rate)] <- median(sliders$spin_rate, na.rm=T
 knuckleballs$spin_rate[is.na(knuckleballs$spin_rate)] <- median(knuckleballs$spin_rate, na.rm=TRUE)
 others$spin_rate[is.na(others$spin_rate)] <- median(others$spin_rate, na.rm=TRUE)
 
-# Combining our pitch types back together
+# Combining our separate data sets back together
 train1 <- bind_rows(fastballs, curveballs, changeups, sinkers, sliders, knuckleballs, others)
+# Freeing memory
+rm(fastballs, curveballs, changeups, sinkers, sliders, knuckleballs, others)
 
-rm(fastballs, curveballs, changeups, sinkers, sliders, knuckleballs, others) # Freeing memory
-
+# Checking our NA values again 
 sort(colSums(is.na(train1)))
 ```
 
 ### Other Missing/Usual Values
-At this stage, we don't have many more missing values.  There are a series of unusual values where `vert_break`, `induced_break`, and `horz_break` have values of 0.0000.  We will remove the remaining unsual and missing values. 
-
+At this stage, we don't have many more missing values.  There are a series of unusual values where `vert_break`, `induced_break`, and `horz_break` have values of 0.0000.  We will remove the remaining unusual and missing values. 
 ```{r}
+# Table of our NA values for break, notice horz_break are missing as well
 train1 %>% 
   filter(is.na(vert_break))
+# Table that shows our unusual missing values for break 
 train1 %>% 
   filter(vert_break == 0)
-# I find it very wierd that we are seeing values of 0.000 and I cannot explain the NA values for break, it may be random
-# Break is a very important variable so to access this accurately we should just throw out these missing values 
-# There is about 171 rows with NA and 450 rows of 0's across the board
-# I am ok with throwing away the data 
-# PCA?
-
 # Dropping NA values
 train1 <- na.omit(train1)
-
-# dropping rows where break was not recorded or recorded as 0.0000
+# Dropping rows where break recorded as 0.0000
 train1 <-subset(train1, vert_break!= 0)
-
+# Changing strings to factors
 train1 <- as.data.frame(unclass(train1),                     
                         stringsAsFactors = TRUE)
+# Looking at NA values
+sort(colSums(is.na(train1)))
 ```
 
 ## Count Variable
 
-Next let's add a count variable.  The reason for this is because each count is unique, and an 0-0 count should be treated differently than an 0-2 count. 
+Next let's add a `count` variable.  The reason for this is because each count is unique, and an 0-0 count should be treated differently than an 0-2 count.  Since we will be converting these variable to a dummy variable.  Proper syntax is important so `count00` represents a 0-0 count.  
 ```{r}
 # Creating a count variable 
 train1 <- train1 %>% 
-  mutate(count = paste(balls, "-", strikes)) 
-train1$count <- as.factor(train1$count)
+  mutate(count = paste("count", balls, strikes, sep = "")) 
+train1$count <- as.factor(train1$count) # Changing object to factor
 
-table(train1$count)
+levels(train1$count)
 ```
 
-## Hitter-Pitcher Matchup
+## Normalizing Horizontal Movements
+
+```{r}
+    train1 <- train1 %>%
+      # Release Side
+      mutate(rel_side = ifelse(pitcher_side == 'Left', rel_side*(-1), rel_side)) %>% 
+      # Horizontal Release Angle
+      mutate(horz_release_angle = ifelse(pitcher_side == 'Left', 
+                                         horz_release_angle*(-1), horz_release_angle)) %>%
+      # Horizontal Break
+      mutate(horz_break = ifelse(pitcher_side == 'Left', horz_break*(-1), horz_break)) %>%
+      # Horizontal Approach Angle
+      mutate(horz_approach_angle = ifelse(pitcher_side == 'Left', horz_approach_angle*(-1),
+                                          horz_approach_angle))
+```
+
+## Hitter Pitcher Matchup
 
 Is this a Righty-Right matchup?  Righty-Lefty matchup?  
 ```{r}
 # Creating a matchup feature
       # Matchup will indicate the handedness of the matchups
-      train1 <- na.omit(train1)
       train1 <- train1 %>% 
               mutate(matchup = 
-                       ifelse(pitcher_side == "Right" & batter_side == "Right", "Righty-Righty",
-                       ifelse(pitcher_side == "Right" & batter_side == "Left", "Righty-Lefty",
-                       ifelse(pitcher_side == "Right" & batter_side == "Undefine", "Righty-Lefty",
-                       ifelse(pitcher_side == "Left" & batter_side == "Left", "Lefty-Lefty",
-                       ifelse(pitcher_side == "Left" & batter_side == "Right", "Lefty-Righty",
-                       ifelse(pitcher_side == "Left" & batter_side == "Switch", "Lefty-Righty","NA")))))))
+                       ifelse(pitcher_side == "Right" & batter_side == "Right", 
+                              "Righty-Righty",
+                       ifelse(pitcher_side == "Right" & batter_side == "Left",
+                              "Righty-Lefty",
+                       ifelse(pitcher_side == "Right" & batter_side == "Undefine",
+                              "Righty-Lefty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Left",
+                              "Lefty-Lefty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Right",
+                              "Lefty-Righty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Switch",
+                              "Lefty-Righty","NA")))))))
       
       train1$matchup <- as.factor(train1$matchup)
-      
       table(train1$matchup)
 ```
 
-## 2.2 Resampling for the Imbalanced Classes 
+# Model Building 
 
-Since a home run occurs less than 1% of all pitches in the data set, a model like a random forest can predict ‘No HR’ every observation and the model would be correct 99% of the time, but that’s not useful for us.  Mulitple techniques for resolving the class imbalances were considered such as down-sampling, up-sampling, and hybrid method algorithms like SMOTE and ROSE.  This is different from splitting the data set.  The data was split into training and testing.  Once a balanced data set was created from the unbalanced training set, a prediction model was built off this augmented data set, and applied to the unbalanced test data.  
+We are going to build a series of models and evaluate their results.  My first assumption is that non-linear / tree models will perform better than linear models.  This assumption stems from the fact that most metrics need to fall within a certain parameter for the pitch to result in a home run.  For example, a home run pitch needs to fall between a certain height and width.  A home run also needs to fall within a certain vertical and horizontal release and approach angles.  There are not many linear relationships for some of our most important variables, but we will build out both linear and non-linear models and evaluate them.    
 
-### Down-sampling
-The first resampling technique was down-sampling.  Down sampling is where we randomly subset all the classes in the training set so that their class frequencies match the minority class.  This would result in using only 2% of our training data being used to fit the mode.  
+## Pre-Processing
+
+
 ```{r}
-# Let's create different versions of the training set prior to model tuning
+train1$is_hr <- as.logical(train1$is_hr)
 
-# Down sampling the data set 
+train_df <- train1 %>%
+  filter(!is.na(pitch_type)) %>% 
+  select(pitcher_side, batter_side, release_speed, vert_release_angle, 
+         horz_release_angle, spin_rate, spin_axis, rel_height,
+         rel_side, extension, induced_vert_break, horz_break,
+         plate_height, plate_side, zone_speed, vert_approach_angle, horz_approach_angle,
+         x55, z55, pitch_type, count, matchup, is_hr) %>%
+  mutate(is_hr = case_when(
+    is_hr ~ "HR",
+    TRUE ~ "No HR"
+  )) %>%
+  mutate_if(is.character, factor) %>%
+  mutate_if(is.logical, as.integer)
+```
 
-    # Changing is_hr, balls, strikes, and outs to a factor
-    train2 <- train1 %>%
-      mutate(is_hr = ifelse(is_hr == 1, "Class2", "Class1")) %>% 
-      mutate_if(is.character, factor) 
+## Splitting
 
-    train2 <- train2 %>% 
-      rename(Class = is_hr)
-
-pitches_split <- initial_split(train2, strata = Class)
+Here we are splitting our data and creating cross validation folds.  
+```{r}
+set.seed(123)
+pitches_split <- initial_split(train_df, strata = is_hr)
 pitches_train <- training(pitches_split)
 pitches_test <- testing(pitches_split)
 
-# Clearing up memory 
-rm(train, train1)
+set.seed(123)
+pitches_folds <- vfold_cv(pitches_train, strata = is_hr)
 ```
 
-
+Creating a recipe for our model.  In our recipe we are including a function to change all our factor variables to dummy variables. 
 ```{r}
-# Down sampling the data set 
-set.seed(400)
-down_train <- downSample(x = pitches_train[, -ncol(pitches_train)],
-                         y = pitches_train$Class)
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) 
 
-table(down_train$Class)
+pitches_rec
+```
+Setting up our models.  We are starting with a logistic regression, bagged-tree model, and a random forest.  The metrics we will collect to evaluate our model are area under the ROC curve, log-loss, accuracy, sensitivity, and specificity.   
+```{r}
+# Logistic Regression
+glm_spec <- logistic_reg() %>%
+  set_engine("glm")
+
+# Random Forest
+rf_spec <- rand_forest(trees = 1000) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+# Bagged Tree Model
+bag_spec <-
+  bag_tree(min_n = 10) %>%
+  set_engine("rpart", times = 25) %>%
+  set_mode("classification")
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
+
+# Specifying the metrics to be collected
+pitches_metrics <- metric_set(roc_auc, mn_log_loss, accuracy, sensitivity, specificity)
 ```
 
-### Up-sampling
+## Logistic Regression Model
+```{r}
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(glm_rs)
+```
+
+## Bagged Tree
+```{r}
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(bag_rs)
+```
+
+## Random Forest Tree
+```{r}
+# Random Forest Model
+doParallel::registerDoParallel()
+rf_rs <- pitches_wf %>%
+  add_model(rf_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(rf_rs)
+```
+
+# Resampling
+
+After evaluating our models we can see the effect of the imbalance in our response variable.  A few techniques will be used to address this where we can find a balance of specificity and sensitivity.  We will look at techniques such as up-sampling, down-sampling, and hybrid algorithms such as SMOTE and ROSE.  
+
+## Down-sampling
+The first resampling technique we will use is down-sampling.  Down sampling is where we randomly subset all the classes in the training set so that their class frequencies match the minority class.  This would result in using only 2% of our training data being used to fit the mode.  
+```{r}
+# Creating our recipe for down sampling
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_downsample(is_hr)
+
+# Logistic Regression
+glm_spec <- logistic_reg() %>%
+  set_engine("glm")
+
+# Random Forest
+rf_spec <- rand_forest(trees = 1000) %>%
+  set_mode("classification") %>%
+  set_engine("ranger")
+
+# Bagged Tree Model
+bag_spec <-
+  bag_tree(min_n = 10) %>%
+  set_engine("rpart", times = 25) %>%
+  set_mode("classification")
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
+
+# Specifying the metrics to be collected
+pitches_metrics <- metric_set(roc_auc, mn_log_loss, accuracy, sensitivity, specificity)
+```
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
+```
+
+### Logistic Regression
+```{r}
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(glm_rs)
+```
+
+### Bagged Tree
+```{r}
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(bag_rs)
+```
+
+### Random Forest
+```{r}
+# Random Forest Model
+doParallel::registerDoParallel()
+rf_rs <- pitches_wf %>%
+  add_model(rf_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(rf_rs)
+```
+
+## Up-sampling
+
 The next resampling method is up-sampling.  Up-sampling randomly samples the rare-occurring class to be the same size as the majority class.  In other words, we will now have the same amount of home runs as non-home runs.  
+
 ```{r}
-# Up sampling the data
-set.seed(400)
-up_train <- upSample(x = pitches_train[, -ncol(pitches_train)],
-                     y = pitches_train$Class)                         
-table(up_train$Class) 
+# Creating our recipe for upsampling
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_upsample(is_hr)
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
 ```
 
-### SMOTE
+### Logistic Regression
+```{r}
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(glm_rs)
+```
+
+### Bagged Tree
+```{r}
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(bag_rs)
+```
+
+### Random Forest
+
+To save computational time and memory, the results of this random forest will not be shown here, but we can expect similar results to the bagged tree model.  
+
+## SMOTE
+
 SMOTE stands for *synthetic minority over-sampling technique.  This technique synthesizes new occurrences of home runs from the existing examples. 
 ```{r}
-# SMOTE
-set.seed(9560)
-smote_train <- SMOTE(Class ~ ., data  = pitches_train)                         
-table(smote_train$Class) 
+# Creating our recipe 
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_smote(is_hr)
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
 ```
 
-### ROSE
-ROSE stands for random over-sampling examples and is a bootstrap-based technique to help deal with the imbalanced classes.  
+### Logistic Regression
 ```{r}
-# ROSE
-set.seed(9560)
-rose_train <- ROSE(Class ~ ., data  = pitches_train)$data                         
-table(rose_train$Class) 
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(glm_rs)
 ```
 
-
-### Cross Validation
-To evaluate the techniques  we will used a bagged classification and estimate the AUC (Area under ROC Curve) using five repeats of 10 fold cross validation.  
+### Bagged Tree
 ```{r}
-ctrl <- trainControl(method = "repeatedcv", repeats = 5,
-                     classProbs = TRUE,
-                     summaryFunction = twoClassSummary)
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
 
-set.seed(5627)
-orig_fit <- train(Class ~ ., data = pitches_train, 
-                  method = "treebag",
-                  nbagg = 10,
-                  metric = "ROC",
-                  trControl = ctrl)
+collect_metrics(bag_rs)
 ```
+
+### Random Forest
+
+To save computational time and memory, the results of this random forest will not be shown here, but the results were very similar to the bagged tree model.  
+
+## ROSE
+
+ROSE stands for random over-sampling examples and is a bootstrap-based technique to help deal with the imbalanced classes.  For our tree models, we see unusual resuls where the model's sensitivity results in 1 and the specificity is equal to 0.  The result is an extremely high log loss score as the model predicts home run for every outcome.  
 ```{r}
-set.seed(562)
-down_outside <- train(Class ~ ., data = down_train,
-                      method = "treebag",
-                      nbagg = 10,
-                      metric = "ROC",
-                      trControl = ctrl)
+# Creating our recipe 
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_rose(is_hr)
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
 ```
+
+### Logistic Regression
 ```{r}
-set.seed(562)
-up_outside <- train(Class ~ ., data = up_train, 
-                    method = "treebag",
-                    nbagg = 10,
-                    metric = "ROC",
-                    trControl = ctrl)
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
 
-
+collect_metrics(glm_rs)
 ```
+
+### Bagged Tree
 ```{r}
-set.seed(562)
-smote_outside <- train(Class ~ ., data = smote_train, 
-                      method = "treebag",
-                      nbagg = 10,
-                      metric = "ROC",
-                      trControl = ctrl)
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
 
+collect_metrics(bag_rs)
 ```
+
+### Random Forest
+
+To save computational time and memory, the results of this random forest will not be shown here, but the results were very similar to the bagged tree model. 
+
+## Resampling Part 2
+
+In this previous series of models, we might have better recall and precision, but we are seeing lower log-loss scores because when we do things like over-sample, we are creating equal balanced class so that home runs occur 50% of the time.  When we apply this model to our test data, we generate overly optimistic probabilities that do not truly represent in 'real life'.  To find a balance between overly optimistic predictions and an imbalanced data set, we will do another round of resampling.  This time we will use the same techniques such as down-sampling, up-sampling, SMOTE and ROSE, but instead set a ratio for our classes.  This will be explained further in each technique.
+
+## Down Sampling 
+
+We will down-sample our data again and reduce the amount of 'non-home-run' data points.  Rather than setting the imbalanced classes to equal each other.  We will remove data points from the majority class to where the minority class will have a 1:2 ratio to the majority class.  In other words, we will have 1 home run for every 2 non-home runs.  We are still going to produce overly optimistic probabilities, but not to the extent as 1:1 resampling, and we will have enough data to balance our precision and recall curves.
 ```{r}
-set.seed(562)
-rose_outside <- train(Class ~ ., data = rose_train, 
-                      method = "treebag",
-                      nbagg = 10,
-                      metric = "ROC",
-                      trControl = ctrl)
+# Creating our recipe 
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_downsample(is_hr, under_ratio = 2.5)
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
 ```
 
-# Modeling
-
-## Random Forest
+### Logistic Regression
 ```{r}
-rf_fit <- randomForest(Class ~ spin_rate + 
-                         induced_vert_break +  horz_break + plate_height + plate_side + zone_speed + 
-                         vert_approach_angle + horz_approach_angle + pitch_type + count + matchup,
-                       data = smote_train,
-                       type = classification,
-                       mtry = 5,
-                       na.action = na.roughfix,
-                       ntree = 500,
-                       localImp =TRUE) 
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
 
-print(rf_fit)
-plot(rf_fit)
+collect_metrics(glm_rs)
 ```
-## Model Tuning
-Tuning Random Forests to determine optimal parameters (mtry)
+
+### Bagged Tree
+```{r}
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(bag_rs)
+```
+
+### Random Forest
+```{r}
+# Random Forest Model
+doParallel::registerDoParallel()
+rf_rs <- pitches_wf %>%
+  add_model(rf_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(rf_rs)
+```
+
+
+## Upsample
 
 ```{r}
-rf_mods <- list()
-oob_err <- NULL
-test_err <- NULL
-for(mtry in 1:9){
-  rf_fit <- randomForest(Class ~ 
-                           spin_rate + 
-                           induced_vert_break +  horz_break + plate_height + plate_side + zone_speed + 
-                           vert_approach_angle + horz_approach_angle + pitch_type,
-                         data = smote_train,
-                         mtry = mtry,
-                         na.action = na.roughfix,
-                         ntree = 500)
-  oob_err[mtry] <- rf_fit$err.rate[500]
-  
-  cat(mtry," ")
-}
+# Creating our recipe 
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_upsample(is_hr, over_ratio = .5)
 
-results_DF <- data.frame(mtry = 1:9, oob_err)
-ggplot(results_DF, aes(x = mtry, y = oob_err)) + geom_point() + theme_minimal()
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
+```
+
+### Logistic Regression
+```{r}
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(glm_rs)
+```
+
+### Bagged Tree
+```{r}
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(bag_rs)
+```
+
+### Random Forest
+
+To save computational time and memory, the results of this random forest will not be shown here, but the results were very similar to the bagged tree model. 
+
+## SMOTE RATIO
+
+We will only look at logistic regression for this model because we saw ur tree models have extremely low sensitivity in SMOTE for a 1:1 ratio.  We can only expect the sensitivity to get worse as we add more non-home runs in the data set.
+```{r}
+# Creating our recipe 
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_smote(is_hr, over_ratio = .5)
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
+```
+
+### Logistic Regression
+```{r}
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(glm_rs)
+```
+
+##  ROSE Ratio
+
+We continue to see a 1.0 sensitivity and 0.0 specificity in our tree models even as we continue to change the ratio.  ROSE will no longer be tested any further.    
+```{r}
+# Creating our recipe 
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_rose(is_hr,
+            )
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
+```
+
+### Logistic Regression
+```{r}
+# Linear Model
+doParallel::registerDoParallel()
+glm_rs <- pitches_wf %>%
+  add_model(glm_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(glm_rs)
+```
+
+### Bagged Tree
+```{r}
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(bag_rs)
+```
+
+# Evaluation 
+
+After running a series of models, a series of resampling techniques, and tuning the models by changing ratios, we can conclude that our best resampling technique will be down-sampling.  To fine-tune this further, I continued to add non-home run data points by changing the ratio, and increased the ratio to include as many non-home-runs as possible without affecting the specificity and sensitivity.  
+
+This model is being evaluated on log loss score.  Although the log loss scored actually increased from the initial model, I would argue this is a much useful model.  A model that predicts no home run in every occurrence might be 99% accurate with a extremely low log-loss score but does not provide any use about our variables or what leads to home runs.  There is a tradeoff in accuracy and having optimal sensitivity and specificity.  
+
+# Final Model
+
+The final model is a bagged tree model that was produced from a down-sampling technique with a 2.5:1 ratio of HR:No_HR.  Here are the results.
+
+```{r}
+# Creating our recipe 
+pitches_rec <- recipe(is_hr ~ ., data = pitches_train) %>%
+  step_dummy(all_nominal(), -is_hr) %>% 
+  step_downsample(is_hr, under_ratio = 2.5)
+
+# Add recipe to the workflow
+pitches_wf <- workflow() %>%
+  add_recipe(pitches_rec)
+
+# Bagged Tree Model
+doParallel::registerDoParallel()
+bag_rs_final <- pitches_wf %>%
+  add_model(bag_spec) %>%
+  fit_resamples(
+    resamples = pitches_folds,
+    metrics = pitches_metrics,
+    control = control_resamples(save_pred = TRUE)
+  )
+
+collect_metrics(bag_rs_final)
+```
+
+As shown below and with no surprise, the most important variables in predicting a home run were `plate_side` and `plate_height`.  In other words, the location is the most important variable followed by vertical release angle, release speed, vertical approach angle, induced vertical break, and horizontal release angle.  
+```{r}
+final_wf <- workflow() %>% 
+  add_recipe(pitches_rec) %>% 
+  add_model(bag_spec)
+
+final_modelfit <- fit(final_wf, train_df)
+
+final_modelfit
+```
+
+Looking at the predictions against our other split.  
+```{r}
+preds <- predict(final_modelfit, pitches_test, type = 'prob')
+
+preds <- bind_cols(pitches_test, preds)
+```
+
+Downloading the train dataset and printing the predictions on the original test set (test set that doesn't show outcome)
+```{r, include = FALSE}
+library(writexl, include = FALSE)
+
+test <- read.csv(here('Datasets','test.csv'))
+
+# Pre-process
+
+# Creating a count variable 
+test <- test %>% 
+  mutate(count = paste("count", balls, strikes, sep = "")) 
+test$count <- as.factor(test$count) # Changing object to factor
+
+    test <- test %>%
+      # Release Side
+      mutate(rel_side = ifelse(pitcher_side == 'Left', rel_side*(-1), rel_side)) %>% 
+      # Horizontal Release Angle
+      mutate(horz_release_angle = ifelse(pitcher_side == 'Left', 
+                                         horz_release_angle*(-1), horz_release_angle)) %>%
+      # Horizontal Break
+      mutate(horz_break = ifelse(pitcher_side == 'Left', horz_break*(-1), horz_break)) %>%
+      # Horizontal Approach Angle
+      mutate(horz_approach_angle = ifelse(pitcher_side == 'Left', horz_approach_angle*(-1),
+                                          horz_approach_angle))
+
+ # Creating a matchup feature
+      # Matchup will indicate the handedness of the matchups
+      test <- test %>% 
+              mutate(matchup = 
+                       ifelse(pitcher_side == "Right" & batter_side == "Right", 
+                              "Righty-Righty",
+                       ifelse(pitcher_side == "Right" & batter_side == "Left",
+                              "Righty-Lefty",
+                       ifelse(pitcher_side == "Right" & batter_side == "Undefine",
+                              "Righty-Lefty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Left",
+                              "Lefty-Lefty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Right",
+                              "Lefty-Righty",
+                       ifelse(pitcher_side == "Left" & batter_side == "Switch",
+                              "Lefty-Righty","NA")))))))
+      test$matchup <- as.factor(test$matchup)
 ```
 
 ```{r}
-rf_fit <- randomForest(Class ~ spin_rate + 
-                         induced_vert_break +  horz_break + plate_height + plate_side + zone_speed + 
-                         vert_approach_angle + horz_approach_angle + pitch_type + count + matchup,
-                       data = smote_train,
-                       type = classification,
-                       mtry = 3,
-                       na.action = na.roughfix,
-                       ntree = 500,
-                       localImp =TRUE) 
-
-print(rf_fit)
-plot(rf_fit)
+preds <- predict(final_modelfit, new_data = test, type = 'prob')
+preds <- test %>% 
+  bind_cols(preds) %>% 
+  select(pitch_id, .pred_HR)
 ```
-
-
-We can see here that our top 5 most important variables were pitch type, vertical approach angle, spin rate, induced vertical break, and zone speed.   
-```{r}
-varImpPlot(rf_fit)
-```
-This is a distribution the number of trees each variable had and we can see how each variable plays a role in the random forest. We are obtaining a plot for the top ten variables according to mean minimal death which is calculated using top trees.
-```{r}
-library(randomForestExplainer)
-plot_min_depth_distribution(rf_fit)
-```
-
-
-ctrl <- trainControl(method = "repeatedcv", repeats = 5,
-                         classProbs = TRUE,
-                         summaryFunction = twoClassSummary,
-                         ## new option here:
-                         sampling = "down")
-    
-    set.seed(5627)
-    down_inside <- train(Class ~ ., data = pitches_train,
-                         method = "treebag",
-                         nbagg = 10,
-                         metric = "ROC",
-                         trControl = ctrl)
-    
-    ## now just change that option
-    ctrl$sampling <- "up"
-    
-    set.seed(5627)
-    up_inside <- train(Class ~ ., data = pitches_train,
-                       method = "treebag",
-                       nbagg = 10,
-                       metric = "ROC",
-                       trControl = ctrl)
-    
-    ctrl$sampling <- "rose"
-    
-    set.seed(5627)
-    rose_inside <- train(Class ~ ., data = pitches_train,
-                         method = "treebag",
-                         nbagg = 10,
-                         metric = "ROC",
-                         trControl = ctrl)
-    
-    ctrl$sampling <- "smote"
-    
-    set.seed(5627)
-    smote_inside <- train(Class ~ ., data = pitches_train,
-                          method = "treebag",
-                          nbagg = 10,
-                          metric = "ROC",
-                          trControl = ctrl)
-    
-    # Here are the resampling and test set results 
-    
-    inside_models <- list(original = orig_fit,
-                          down = down_inside,
-                          up = up_inside,
-                          SMOTE = smote_inside,
-                          ROSE = rose_inside)
-
-
-
-
